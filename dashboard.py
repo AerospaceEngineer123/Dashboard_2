@@ -54,25 +54,30 @@ class GhostManager:
         self._init_db()
 
     def _init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
+        # Using 'check_same_thread=False' is vital for Streamlit Cloud stability
+        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
             conn.execute("""CREATE TABLE IF NOT EXISTS shadow_ledger 
                            (id INTEGER PRIMARY KEY, timestamp TEXT, ticker TEXT, 
                             action TEXT, price REAL, shares INTEGER, balance REAL)""")
-            if not conn.execute("SELECT * FROM shadow_ledger").fetchone():
-                conn.execute("INSERT INTO shadow_ledger (timestamp, action, balance) VALUES (?, 'INIT', ?)", 
-                             (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'INIT', 100000.0))
-        conn.commit()
+            
+            # Check if empty
+            cursor = conn.cursor()
+            cursor.execute("SELECT count(*) FROM shadow_ledger")
+            if cursor.fetchone()[0] == 0:
+                # FIXED LINE: 3 columns, 3 placeholders, 3 tuple items
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                conn.execute(
+                    "INSERT INTO shadow_ledger (timestamp, action, balance) VALUES (?, ?, ?)", 
+                    (timestamp, 'INIT', 100000.0)
+                )
+            conn.commit()
 
     def run_autonomous_fleet_cycle(self):
-        """AI loops through the fleet and executes if consensus is reached."""
         if not is_market_open():
             return
-
         for ticker in self.fleet_universe:
             intel = SovereignIntelligence(ticker)
             conf, alignment, _ = intel.get_agent_consensus()
-
-            # Threshold: 3+ Agents must agree at 90% confidence
             if alignment >= 3 and conf >= 0.90:
                 self._execute_fleet_strike(ticker, "AUTO_BUY")
             elif alignment < 2:
@@ -83,25 +88,30 @@ class GhostManager:
             data = yf.download(ticker, period="1d", interval="1m", progress=False)
             if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.get_level_values(0)
             
-            # Explicit primitive casting for SQLite stability
             live_p = float(data['Close'].iloc[-1])
             strike_ticker = str(ticker)
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
                 res = conn.execute("SELECT balance FROM shadow_ledger ORDER BY id DESC LIMIT 1").fetchone()
                 current_bal = float(res[0])
                 shares = 100
                 cost = live_p * shares
 
                 if action == "AUTO_BUY" and current_bal > cost:
-                    conn.execute("INSERT INTO shadow_ledger (timestamp, ticker, action, price, shares, balance) VALUES (?, ?, ?, ?, ?, ?)",
-                                 (timestamp, strike_ticker, "AUTO_BUY", live_p, shares, current_bal - cost))
+                    # FIXED LINE: 6 columns, 6 placeholders, 6 tuple items
+                    conn.execute(
+                        "INSERT INTO shadow_ledger (timestamp, ticker, action, price, shares, balance) VALUES (?, ?, ?, ?, ?, ?)",
+                        (timestamp, strike_ticker, "AUTO_BUY", live_p, shares, current_bal - cost)
+                    )
                 elif action == "AUTO_SELL":
-                    conn.execute("INSERT INTO shadow_ledger (timestamp, ticker, action, price, shares, balance) VALUES (?, ?, ?, ?, ?, ?)",
-                                 (timestamp, strike_ticker, "AUTO_SELL", live_p, shares, current_bal + cost))
+                    conn.execute(
+                        "INSERT INTO shadow_ledger (timestamp, ticker, action, price, shares, balance) VALUES (?, ?, ?, ?, ?, ?)",
+                        (timestamp, strike_ticker, "AUTO_SELL", live_p, shares, current_bal + cost)
+                    )
                 conn.commit()
-        except: pass
+        except Exception as e:
+            print(f"Strike Error: {e}")
 
 def is_market_open():
     est = pytz.timezone('US/Eastern')
@@ -654,3 +664,4 @@ with tab8:
         st.dataframe(ledger_df, use_container_width=True)
     else:
         st.caption("Waiting for market open to log first fleet strike...")
+
